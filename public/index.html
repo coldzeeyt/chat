@@ -51,6 +51,10 @@
               <span>Live mode <em>— see everyone type in real time</em></span>
               <input id="create-live-mode" type="checkbox" />
             </label>
+            <label class="field field-row field-live">
+              <span>Walkie-talkie <em>— push-to-talk voice, 2 people max</em></span>
+              <input id="create-walkie-mode" type="checkbox" />
+            </label>
           </div>
 
           <button id="btn-create" class="btn btn-primary">Create room</button>
@@ -122,6 +126,7 @@
           <div class="chat-sub">
             <span id="chat-code-pill" class="pill" title="Room code">CODE</span>
             <span id="chat-live-pill" class="pill pill-live hidden" title="Live mode: everyone sees typing in real time">LIVE</span>
+            <span id="chat-walkie-pill" class="pill pill-live hidden" title="Walkie-talkie: push-to-talk voice">WALKIE</span>
             <span id="chat-online-count" class="muted"></span>
           </div>
         </div>
@@ -148,6 +153,15 @@
         </div>
 
         <div class="live-grid hidden" id="live-grid"></div>
+
+        <div class="walkie-panel hidden" id="walkie-panel">
+          <div class="walkie-status" id="walkie-status">Waiting for someone to join…</div>
+          <button type="button" class="walkie-ptt-btn" id="walkie-ptt-btn" title="Hold to talk (or hold Space)">
+            <span class="walkie-ptt-icon">🎙</span>
+            <span class="walkie-ptt-label">HOLD TO TALK</span>
+          </button>
+        </div>
+        <audio id="walkie-remote-audio" autoplay></audio>
 
         <div class="messages" id="messages"></div>
 
@@ -222,6 +236,10 @@
         <label class="field field-row field-live">
           <span>Live mode <em>— see everyone type in real time</em></span>
           <input id="room-settings-live-mode" type="checkbox" />
+        </label>
+        <label class="field field-row field-live">
+          <span>Walkie-talkie <em>— push-to-talk voice, 2 people max</em></span>
+          <input id="room-settings-walkie-mode" type="checkbox" />
         </label>
         <button id="btn-save-room" class="btn btn-primary">Save room settings</button>
       </div>

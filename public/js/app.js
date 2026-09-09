@@ -120,6 +120,7 @@
     history.pushState({}, '', `/r/${code}`);
   }
   function goHome() {
+    walkieTeardown();
     history.pushState({}, '', '/');
     showView('home');
   }
@@ -137,11 +138,22 @@
     });
   });
 
+  $('#create-live-mode').addEventListener('change', () => {
+    if ($('#create-live-mode').checked) $('#create-walkie-mode').checked = false;
+  });
+  $('#create-walkie-mode').addEventListener('change', () => {
+    const isWalkie = $('#create-walkie-mode').checked;
+    if (isWalkie) $('#create-live-mode').checked = false;
+    $('#create-max-members').disabled = isWalkie;
+    $('#create-max-members').value = isWalkie ? 2 : '';
+  });
+
   $('#btn-create').addEventListener('click', async () => {
     const name = $('#create-name').value.trim();
     const password = $('#create-password').value;
     const maxMembers = parseInt($('#create-max-members').value, 10);
     const liveMode = $('#create-live-mode').checked;
+    const walkieMode = $('#create-walkie-mode').checked;
     const btn = $('#btn-create');
     btn.disabled = true;
     try {
@@ -153,6 +165,7 @@
           password: password || undefined,
           accent: createAccent,
           liveMode,
+          walkieMode,
           maxMembers: Number.isFinite(maxMembers) ? maxMembers : undefined,
         }),
       });
@@ -251,6 +264,7 @@
   function enterChat() {
     showView('chat');
     selfLiveDraft = '';
+    walkieTeardown();
     document.documentElement.style.setProperty('--accent', room.accent);
     $('#chat-room-name').textContent = room.omegle ? 'Stranger Chat' : room.name;
     $('#chat-code-pill').classList.toggle('hidden', !!room.omegle);
@@ -270,14 +284,19 @@
 
   function applyLiveModeVisibility() {
     const isLive = !!(room && room.liveMode);
+    const isWalkie = !!(room && room.walkieMode);
     $('#chat-live-pill').classList.toggle('hidden', !isLive);
+    $('#chat-walkie-pill').classList.toggle('hidden', !isWalkie);
     $('#messages').classList.toggle('hidden', isLive);
     $('#composer').classList.toggle('hidden', isLive);
     $('#typing-row').classList.toggle('hidden', isLive);
     $('#live-grid').classList.toggle('hidden', !isLive);
+    $('#walkie-panel').classList.toggle('hidden', !isWalkie);
     if (isLive) $('#pinned-bar').classList.add('hidden');
     $('#composer-input').placeholder = room && room.omegle ? 'Say hi…' : 'Message… (try /me or /shrug)';
     if (isLive) renderLiveGrid();
+    if (isWalkie) walkieMaybeNegotiate();
+    else walkieTeardown();
   }
 
   $('#chat-code-pill').addEventListener('click', () => {
@@ -622,6 +641,181 @@
     renderLiveGrid();
   });
 
+  // ---------- Walkie-talkie mode (push-to-talk voice, 2 people max) ----------
+  const WALKIE_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+  let walkiePC = null;
+  let walkieLocalStream = null;
+  let walkieOfferSent = false;
+  let walkieTalking = false;
+
+  function walkieSetStatus(text, cls) {
+    const el = $('#walkie-status');
+    el.textContent = text;
+    el.className = 'walkie-status' + (cls ? ' ' + cls : '');
+  }
+
+  function walkieSetButtonState(state) {
+    const btn = $('#walkie-ptt-btn');
+    btn.classList.remove('talking', 'disabled', 'peer-talking');
+    if (state !== 'idle') btn.classList.add(state);
+    btn.disabled = state === 'disabled' || state === 'peer-talking';
+  }
+
+  function walkieOtherName() {
+    const other = members.find((m) => m.clientId !== clientId);
+    return other ? other.displayName : 'the other person';
+  }
+
+  async function walkieEnsureLocalStream() {
+    if (walkieLocalStream) return walkieLocalStream;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getAudioTracks().forEach((t) => (t.enabled = false));
+    walkieLocalStream = stream;
+    return stream;
+  }
+
+  function walkieGetOrCreatePC() {
+    if (walkiePC) return walkiePC;
+    const pc = new RTCPeerConnection({ iceServers: WALKIE_ICE_SERVERS });
+    if (walkieLocalStream) {
+      walkieLocalStream.getTracks().forEach((t) => pc.addTrack(t, walkieLocalStream));
+    }
+    pc.onicecandidate = (e) => {
+      if (e.candidate) socket.emit('webrtc_signal', { type: 'candidate', candidate: e.candidate });
+    };
+    pc.ontrack = (e) => {
+      const audioEl = $('#walkie-remote-audio');
+      audioEl.srcObject = e.streams[0];
+      audioEl.play().catch(() => {});
+    };
+    walkiePC = pc;
+    return pc;
+  }
+
+  function walkieTeardown() {
+    if (walkiePC) {
+      walkiePC.close();
+      walkiePC = null;
+    }
+    if (walkieLocalStream) {
+      walkieLocalStream.getTracks().forEach((t) => t.stop());
+      walkieLocalStream = null;
+    }
+    walkieOfferSent = false;
+    walkieTalking = false;
+    const audioEl = $('#walkie-remote-audio');
+    audioEl.srcObject = null;
+  }
+
+  async function walkieMaybeNegotiate() {
+    if (!room || !room.walkieMode) return;
+    if (members.length !== 2) {
+      walkieTeardown();
+      walkieSetStatus('Waiting for someone to join…');
+      walkieSetButtonState('disabled');
+      return;
+    }
+    const other = members.find((m) => m.clientId !== clientId);
+    if (!other) return;
+
+    try {
+      await walkieEnsureLocalStream();
+    } catch {
+      walkieSetStatus('Microphone access is required for walkie-talkie');
+      walkieSetButtonState('disabled');
+      return;
+    }
+
+    const pc = walkieGetOrCreatePC();
+    walkieSetStatus(`Connected with ${other.displayName} — hold the button to talk`);
+    walkieSetButtonState('idle');
+
+    const iAmOfferer = clientId < other.clientId;
+    if (iAmOfferer && !walkieOfferSent && pc.signalingState === 'stable') {
+      walkieOfferSent = true;
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('webrtc_signal', { type: 'offer', sdp: offer });
+    }
+  }
+
+  socket.on('webrtc_signal', async ({ data }) => {
+    if (!room || !room.walkieMode) return;
+    try {
+      await walkieEnsureLocalStream();
+    } catch { /* mic unavailable; still try to receive remote audio */ }
+    const pc = walkieGetOrCreatePC();
+    try {
+      if (data.type === 'offer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('webrtc_signal', { type: 'answer', sdp: answer });
+      } else if (data.type === 'answer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      } else if (data.type === 'candidate' && data.candidate) {
+        await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+      }
+    } catch (err) {
+      console.error('walkie-talkie signaling error', err);
+    }
+  });
+
+  function walkieStartTalking() {
+    if (!walkieLocalStream || !room || !room.walkieMode || walkieTalking) return;
+    socket.emit('ptt_start', {}, (res) => {
+      if (res && res.error) return toast(res.error);
+      walkieTalking = true;
+      walkieLocalStream.getAudioTracks().forEach((t) => (t.enabled = true));
+      walkieSetButtonState('talking');
+      walkieSetStatus('You are transmitting…', 'on-air');
+    });
+  }
+
+  function walkieStopTalking() {
+    if (!walkieTalking) return;
+    walkieTalking = false;
+    if (walkieLocalStream) walkieLocalStream.getAudioTracks().forEach((t) => (t.enabled = false));
+    socket.emit('ptt_stop');
+    walkieSetButtonState('idle');
+    walkieSetStatus(`Connected with ${walkieOtherName()} — hold the button to talk`);
+  }
+
+  const walkiePttBtn = $('#walkie-ptt-btn');
+  walkiePttBtn.addEventListener('mousedown', walkieStartTalking);
+  walkiePttBtn.addEventListener('touchstart', (e) => { e.preventDefault(); walkieStartTalking(); });
+  ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((evt) => {
+    walkiePttBtn.addEventListener(evt, walkieStopTalking);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.code !== 'Space' || e.repeat) return;
+    if (!room || !room.walkieMode) return;
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    e.preventDefault();
+    walkieStartTalking();
+  });
+  document.addEventListener('keyup', (e) => {
+    if (e.code !== 'Space') return;
+    if (!room || !room.walkieMode) return;
+    walkieStopTalking();
+  });
+
+  socket.on('ptt_update', ({ clientId: cid, talking }) => {
+    if (cid === clientId) return;
+    if (talking) {
+      walkieSetButtonState('peer-talking');
+      walkieSetStatus(`${walkieOtherName()} is talking…`, 'peer-talking');
+    } else {
+      walkieSetButtonState(walkieTalking ? 'talking' : 'idle');
+      walkieSetStatus(
+        walkieTalking ? 'You are transmitting…' : `Connected with ${walkieOtherName()} — hold the button to talk`,
+        walkieTalking ? 'on-air' : ''
+      );
+    }
+  });
+
   // ---------- Typing indicator ----------
   socket.on('typing_update', (names) => {
     const row = $('#typing-row');
@@ -651,6 +845,7 @@
     Object.keys(liveDrafts).forEach((id) => { if (!activeIds.has(id)) delete liveDrafts[id]; });
     renderMembers();
     if (room && room.liveMode) renderLiveGrid();
+    if (room && room.walkieMode) walkieMaybeNegotiate();
   });
 
   socket.on('room_updated', (r) => {
@@ -685,6 +880,7 @@
       '#room-settings-max-members',
       '#room-settings-closed',
       '#room-settings-live-mode',
+      '#room-settings-walkie-mode',
       '#btn-save-room',
     ].forEach((sel) => {
       $(sel).disabled = !isOwner;
@@ -693,8 +889,10 @@
       $('#room-settings-name').value = room.name;
       $('#room-settings-slowmode').value = room.slowMode || 0;
       $('#room-settings-max-members').value = room.maxMembers || 0;
+      $('#room-settings-max-members').disabled = !isOwner || !!room.walkieMode;
       $('#room-settings-closed').checked = !!room.closed;
       $('#room-settings-live-mode').checked = !!room.liveMode;
+      $('#room-settings-walkie-mode').checked = !!room.walkieMode;
       renderSwatches($('#room-settings-swatches'), room.accent, (c) => {
         if (isOwner) $('#room-settings-swatches').dataset.picked = c;
       }, ROOM_ACCENTS);
@@ -733,6 +931,16 @@
     profile = saveProfile({ sound: $('#settings-sound').checked });
   });
 
+  $('#room-settings-live-mode').addEventListener('change', () => {
+    if ($('#room-settings-live-mode').checked) $('#room-settings-walkie-mode').checked = false;
+  });
+  $('#room-settings-walkie-mode').addEventListener('change', () => {
+    const isWalkie = $('#room-settings-walkie-mode').checked;
+    if (isWalkie) $('#room-settings-live-mode').checked = false;
+    $('#room-settings-max-members').disabled = isWalkie;
+    if (isWalkie) $('#room-settings-max-members').value = 2;
+  });
+
   $('#btn-save-room').addEventListener('click', () => {
     socket.emit(
       'update_room_settings',
@@ -742,6 +950,7 @@
         maxMembers: Number($('#room-settings-max-members').value) || 0,
         closed: $('#room-settings-closed').checked,
         liveMode: $('#room-settings-live-mode').checked,
+        walkieMode: $('#room-settings-walkie-mode').checked,
         accent: $('#room-settings-swatches').dataset.picked,
       },
       (res) => {

@@ -19,7 +19,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 // ---------- REST API ----------
 
 app.post('/api/rooms', (req, res) => {
-  const { name, password, accent, liveMode, maxMembers } = req.body || {};
+  const { name, password, accent, liveMode, maxMembers, walkieMode } = req.body || {};
   const roomName = (name || '').trim().slice(0, 60) || 'Untitled Room';
 
   let code;
@@ -28,7 +28,17 @@ app.post('/api/rooms', (req, res) => {
   } while (store.getRoom(code));
 
   const ownerToken = nanoid(24);
-  store.createRoom({ code, name: roomName, password, ownerToken, accent, liveMode: !!liveMode, maxMembers: Number(maxMembers) });
+  const isWalkie = !!walkieMode;
+  store.createRoom({
+    code,
+    name: roomName,
+    password,
+    ownerToken,
+    accent,
+    liveMode: isWalkie ? false : !!liveMode,
+    maxMembers: isWalkie ? 2 : Number(maxMembers),
+    walkieMode: isWalkie,
+  });
 
   res.json({ code, ownerToken });
 });
@@ -48,6 +58,7 @@ app.get('/api/rooms/:code', (req, res) => {
     closed: room.closed,
     liveMode: room.liveMode,
     maxMembers: room.maxMembers,
+    walkieMode: room.walkieMode,
     memberCount: memberCount(room.code),
   });
 });
@@ -73,6 +84,7 @@ const lastMessageAt = new Map(); // clientId -> timestamp, for slow mode
 const typingState = new Map(); // roomCode -> Set of display names currently typing
 const liveDrafts = new Map(); // roomCode -> Map(clientId -> { text, updatedAt })
 const omegleQueue = []; // array of socket.id waiting for a random stranger
+const walkieTalkers = new Map(); // roomCode -> clientId currently transmitting
 
 function sanitize(text) {
   return String(text)
@@ -161,6 +173,7 @@ io.on('connection', (socket) => {
         liveMode: room.liveMode,
         maxMembers: room.maxMembers,
         omegle: room.omegle,
+        walkieMode: room.walkieMode,
         pinnedMessageId: room.pinnedMessageId,
         isOwner: socket.data.isOwner,
       },
@@ -319,14 +332,56 @@ io.on('connection', (socket) => {
     if (typeof patch.closed === 'boolean') update.closed = patch.closed;
     if (typeof patch.liveMode === 'boolean') update.liveMode = patch.liveMode;
     if (typeof patch.maxMembers === 'number') update.maxMembers = Math.max(0, Math.min(200, Math.floor(patch.maxMembers)));
+    if (typeof patch.walkieMode === 'boolean') update.walkieMode = patch.walkieMode;
+
+    if (update.walkieMode === true) {
+      update.liveMode = false;
+      update.maxMembers = 2;
+    } else if (update.liveMode === true) {
+      const walkieStaysOn = update.walkieMode === undefined ? room.walkieMode : update.walkieMode;
+      if (walkieStaysOn) update.walkieMode = false;
+    }
 
     const updated = store.updateRoom(code, update);
     if (update.liveMode === false) {
       liveDrafts.delete(code);
       io.to(code).emit('live_typing_cleared');
     }
+    if (update.walkieMode === false && room.walkieMode) {
+      walkieTalkers.delete(code);
+    }
     io.to(code).emit('room_updated', publicRoom(updated));
     cb && cb({ ok: true });
+  });
+
+  // ---------- Walkie-talkie mode (push-to-talk, max 2) ----------
+  socket.on('webrtc_signal', (data) => {
+    const { code, member } = socket.data;
+    const room = code && store.getRoom(code);
+    if (!room || !room.walkieMode || !member) return;
+    socket.to(code).emit('webrtc_signal', { from: member.clientId, data });
+  });
+
+  socket.on('ptt_start', (_data, cb) => {
+    const { code, member } = socket.data;
+    const room = code && store.getRoom(code);
+    if (!room || !room.walkieMode || !member) return cb && cb({ error: 'Not in a walkie-talkie room' });
+    const current = walkieTalkers.get(code);
+    if (current && current !== member.clientId) {
+      return cb && cb({ error: 'Channel busy' });
+    }
+    walkieTalkers.set(code, member.clientId);
+    socket.to(code).emit('ptt_update', { clientId: member.clientId, talking: true });
+    cb && cb({ ok: true });
+  });
+
+  socket.on('ptt_stop', () => {
+    const { code, member } = socket.data;
+    if (!code || !member) return;
+    if (walkieTalkers.get(code) === member.clientId) {
+      walkieTalkers.delete(code);
+      socket.to(code).emit('ptt_update', { clientId: member.clientId, talking: false });
+    }
   });
 
   // ---------- Omegle (random stranger) mode ----------
@@ -375,6 +430,9 @@ io.on('connection', (socket) => {
     if (typingState.has(code)) {
       typingState.get(code).delete(member.clientId);
       socket.to(code).emit('typing_update', Array.from(typingState.get(code).values()));
+    }
+    if (room && room.walkieMode && walkieTalkers.get(code) === member.clientId) {
+      walkieTalkers.delete(code);
     }
     setImmediate(() => {
       const stillPresent = presenceList(code).some((m) => m.clientId === member.clientId);
@@ -469,6 +527,7 @@ function publicRoom(room) {
     liveMode: room.liveMode,
     maxMembers: room.maxMembers,
     omegle: room.omegle,
+    walkieMode: room.walkieMode,
     pinnedMessageId: room.pinnedMessageId,
   };
 }
