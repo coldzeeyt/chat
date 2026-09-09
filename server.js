@@ -358,7 +358,7 @@ io.on('connection', (socket) => {
   socket.on('webrtc_signal', (data) => {
     const { code, member } = socket.data;
     const room = code && store.getRoom(code);
-    if (!room || !room.walkieMode || !member) return;
+    if (!room || !(room.walkieMode || room.omegle) || !member) return;
     socket.to(code).emit('webrtc_signal', { from: member.clientId, data });
   });
 

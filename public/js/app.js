@@ -121,6 +121,7 @@
   }
   function goHome() {
     walkieTeardown();
+    omegleFullTeardown();
     history.pushState({}, '', '/');
     showView('home');
   }
@@ -265,6 +266,7 @@
     showView('chat');
     selfLiveDraft = '';
     walkieTeardown();
+    if (!room.omegle) omegleFullTeardown();
     document.documentElement.style.setProperty('--accent', room.accent);
     $('#chat-room-name').textContent = room.omegle ? 'Stranger Chat' : room.name;
     $('#chat-code-pill').classList.toggle('hidden', !!room.omegle);
@@ -272,10 +274,16 @@
     $('#btn-members-toggle').classList.toggle('hidden', !!room.omegle);
     $('#btn-invite').classList.toggle('hidden', !!room.omegle);
     $('#btn-settings').classList.toggle('hidden', !!room.omegle);
+    $('#btn-omegle-camera').classList.toggle('hidden', !room.omegle);
     $('#btn-omegle-new').classList.toggle('hidden', !room.omegle);
     $('#btn-omegle-leave').classList.toggle('hidden', !room.omegle);
     $('#sidebar').classList.toggle('hidden', !!room.omegle);
     $('#sidebar').classList.remove('open');
+    if (room.omegle) {
+      omegleUpdateCameraButton(omegleCameraOn);
+      $('#omegle-self-tile').classList.toggle('hidden', !omegleCameraOn);
+      omegleShowVideoRowIfNeeded();
+    }
     renderMessages();
     renderMembers();
     renderPinned();
@@ -325,6 +333,7 @@
   });
 
   $('#btn-omegle-new').addEventListener('click', () => {
+    omegleClosePC();
     socket.emit('omegle_skip');
     showView('omegleWait');
     $('#omegle-wait-title').textContent = 'Looking for someone…';
@@ -332,24 +341,196 @@
   });
 
   $('#btn-omegle-leave').addEventListener('click', () => {
+    omegleFullTeardown();
     socket.emit('omegle_stop');
     room = null;
     goHome();
   });
 
   socket.on('omegle_matched', (payload) => {
+    omegleClosePC();
     room = payload.room;
     messages = [];
     members = payload.members;
     liveDrafts = {};
+    const other = members.find((m) => m.clientId !== clientId);
+    omeglePolite = other ? clientId > other.clientId : false;
     enterChat();
     appendSystemNotice("You're now chatting with a stranger. Say hi!");
     toast("You're connected with a stranger");
+    if (omegleCameraOn && omegleLocalStream) {
+      const pc = omegleGetOrCreatePC();
+      omegleLocalStream.getVideoTracks().forEach((t) => pc.addTrack(t, omegleLocalStream));
+      socket.emit('webrtc_signal', { type: 'camera_state', on: true });
+    }
   });
 
   socket.on('omegle_partner_left', () => {
+    omegleClosePC();
     appendSystemNotice('Stranger has disconnected. Click "New" to find someone else.');
     toast('Stranger has disconnected');
+  });
+
+  // ---------- Omegle camera toggle (video, WebRTC perfect negotiation) ----------
+  let omeglePC = null;
+  let omegleLocalStream = null;
+  let omegleCameraOn = false;
+  let omegleMakingOffer = false;
+  let omeglePolite = false;
+  let omegleIgnoreOffer = false;
+
+  function omegleUpdateCameraButton(on) {
+    const btn = $('#btn-omegle-camera');
+    btn.classList.toggle('active', on);
+    btn.title = on ? 'Turn camera off' : 'Turn camera on';
+  }
+
+  function omegleShowVideoRowIfNeeded() {
+    const remoteVisible = !$('#omegle-remote-tile').classList.contains('hidden');
+    $('#omegle-video-row').classList.toggle('hidden', !(omegleCameraOn || remoteVisible));
+  }
+
+  function omegleSetPeerCameraOn(on) {
+    $('#omegle-remote-tile').classList.toggle('hidden', !on);
+    if (!on) $('#omegle-remote-video').srcObject = null;
+    omegleShowVideoRowIfNeeded();
+  }
+
+  function omegleGetOrCreatePC() {
+    if (omeglePC) return omeglePC;
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc.onicecandidate = (e) => {
+      if (e.candidate) socket.emit('webrtc_signal', { type: 'candidate', candidate: e.candidate });
+    };
+    pc.ontrack = (e) => {
+      const el = $('#omegle-remote-video');
+      el.srcObject = e.streams[0];
+      el.play().catch(() => {});
+      omegleSetPeerCameraOn(true);
+    };
+    pc.onnegotiationneeded = async () => {
+      try {
+        omegleMakingOffer = true;
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('webrtc_signal', { type: 'offer', sdp: pc.localDescription });
+      } catch (err) {
+        console.error('omegle negotiation error', err);
+      } finally {
+        omegleMakingOffer = false;
+      }
+    };
+    omeglePC = pc;
+    return pc;
+  }
+
+  function omegleClosePC() {
+    if (omeglePC) {
+      omeglePC.close();
+      omeglePC = null;
+    }
+    omegleMakingOffer = false;
+    omegleIgnoreOffer = false;
+    $('#omegle-remote-video').srcObject = null;
+    omegleSetPeerCameraOn(false);
+  }
+
+  function omegleStopCamera() {
+    if (omeglePC) {
+      omeglePC.getSenders()
+        .filter((s) => s.track && s.track.kind === 'video')
+        .forEach((s) => omeglePC.removeTrack(s));
+    }
+    if (omegleLocalStream) {
+      omegleLocalStream.getTracks().forEach((t) => t.stop());
+      omegleLocalStream = null;
+    }
+    omegleCameraOn = false;
+    $('#omegle-self-video').srcObject = null;
+    $('#omegle-self-tile').classList.add('hidden');
+    omegleUpdateCameraButton(false);
+    omegleShowVideoRowIfNeeded();
+  }
+
+  function omegleFullTeardown() {
+    omegleClosePC();
+    omegleStopCamera();
+  }
+
+  async function omegleStartCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      omegleLocalStream = stream;
+      omegleCameraOn = true;
+      const selfVideo = $('#omegle-self-video');
+      selfVideo.srcObject = stream;
+      selfVideo.play().catch(() => {});
+      $('#omegle-self-tile').classList.remove('hidden');
+      omegleShowVideoRowIfNeeded();
+      omegleUpdateCameraButton(true);
+      if (room && room.omegle && members.length === 2) {
+        const pc = omegleGetOrCreatePC();
+        stream.getVideoTracks().forEach((t) => pc.addTrack(t, stream));
+      }
+      socket.emit('webrtc_signal', { type: 'camera_state', on: true });
+    } catch (err) {
+      console.error('omegle camera error', err);
+      toast(omegleCameraErrorMessage(err));
+    }
+  }
+
+  function omegleCameraErrorMessage(err) {
+    if (!window.isSecureContext) return 'Video needs a secure (https) connection — this page is not secure';
+    if (err && err.name === 'NotAllowedError') return "Camera permission was denied — allow it in your browser's site settings";
+    if (err && err.name === 'NotFoundError') return 'No camera was found on this device';
+    return 'Could not access your camera';
+  }
+
+  $('#btn-omegle-camera').addEventListener('click', () => {
+    if (!room || !room.omegle) return;
+    if (omegleCameraOn) {
+      omegleStopCamera();
+      socket.emit('webrtc_signal', { type: 'camera_state', on: false });
+    } else {
+      omegleStartCamera();
+    }
+  });
+
+  socket.on('webrtc_signal', async ({ data }) => {
+    if (!room || !room.omegle) return;
+    if (data.type === 'camera_state') {
+      omegleSetPeerCameraOn(!!data.on);
+      return;
+    }
+    const pc = omegleGetOrCreatePC();
+    try {
+      if (data.type === 'offer') {
+        const offerCollision = omegleMakingOffer || pc.signalingState !== 'stable';
+        omegleIgnoreOffer = !omeglePolite && offerCollision;
+        if (omegleIgnoreOffer) return;
+        if (offerCollision) {
+          await Promise.all([
+            pc.setLocalDescription({ type: 'rollback' }),
+            pc.setRemoteDescription(new RTCSessionDescription(data.sdp)),
+          ]);
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        }
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit('webrtc_signal', { type: 'answer', sdp: pc.localDescription });
+      } else if (data.type === 'answer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      } else if (data.type === 'candidate' && data.candidate) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (err) {
+          if (!omegleIgnoreOffer) throw err;
+        }
+      }
+    } catch (err) {
+      console.error('omegle signaling error', err);
+    }
   });
 
   function appendSystemNotice(text) {
@@ -641,8 +822,18 @@
     renderLiveGrid();
   });
 
+  // ---------- Shared WebRTC config (walkie-talkie voice + omegle video) ----------
+  // STUN alone only works when neither side is behind a restrictive/symmetric NAT.
+  // Open Relay's public TURN servers are included as a fallback so calls still
+  // connect for the (very common) case where a direct P2P path can't be found.
+  const ICE_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  ];
+
   // ---------- Walkie-talkie mode (push-to-talk voice, 2 people max) ----------
-  const WALKIE_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
   let walkiePC = null;
   let walkieLocalStream = null;
   let walkieOfferSent = false;
@@ -666,6 +857,13 @@
     return other ? other.displayName : 'the other person';
   }
 
+  function walkieMicErrorMessage(err) {
+    if (!window.isSecureContext) return 'Voice needs a secure (https) connection — this page is not secure';
+    if (err && err.name === 'NotAllowedError') return 'Microphone permission was denied — allow it in your browser\'s site settings and rejoin';
+    if (err && err.name === 'NotFoundError') return 'No microphone was found on this device';
+    return 'Could not access your microphone for walkie-talkie';
+  }
+
   async function walkieEnsureLocalStream() {
     if (walkieLocalStream) return walkieLocalStream;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -676,7 +874,7 @@
 
   function walkieGetOrCreatePC() {
     if (walkiePC) return walkiePC;
-    const pc = new RTCPeerConnection({ iceServers: WALKIE_ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     if (walkieLocalStream) {
       walkieLocalStream.getTracks().forEach((t) => pc.addTrack(t, walkieLocalStream));
     }
@@ -688,6 +886,21 @@
       audioEl.srcObject = e.streams[0];
       audioEl.play().catch(() => {});
     };
+    const handleConnectionState = () => {
+      const state = pc.connectionState || pc.iceConnectionState;
+      if (state === 'connected' || state === 'completed') {
+        walkieSetStatus(`Connected with ${walkieOtherName()} — hold the button to talk`);
+        walkieSetButtonState(walkieTalking ? 'talking' : 'idle');
+      } else if (state === 'failed' || state === 'disconnected') {
+        walkieSetStatus('Connection lost — this can happen on strict networks. Try again.');
+        walkieSetButtonState('disabled');
+      } else if (state === 'connecting' || state === 'checking') {
+        walkieSetStatus(`Connecting to ${walkieOtherName()}…`);
+        walkieSetButtonState('disabled');
+      }
+    };
+    pc.onconnectionstatechange = handleConnectionState;
+    pc.oniceconnectionstatechange = handleConnectionState;
     walkiePC = pc;
     return pc;
   }
@@ -720,15 +933,19 @@
 
     try {
       await walkieEnsureLocalStream();
-    } catch {
-      walkieSetStatus('Microphone access is required for walkie-talkie');
+    } catch (err) {
+      console.error('walkie-talkie mic error', err);
+      walkieSetStatus(walkieMicErrorMessage(err));
       walkieSetButtonState('disabled');
       return;
     }
 
     const pc = walkieGetOrCreatePC();
-    walkieSetStatus(`Connected with ${other.displayName} — hold the button to talk`);
-    walkieSetButtonState('idle');
+    const state = pc.connectionState || pc.iceConnectionState;
+    if (state !== 'connected' && state !== 'completed') {
+      walkieSetStatus(`Connecting to ${other.displayName}…`);
+      walkieSetButtonState('disabled');
+    }
 
     const iAmOfferer = clientId < other.clientId;
     if (iAmOfferer && !walkieOfferSent && pc.signalingState === 'stable') {

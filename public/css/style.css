@@ -406,6 +406,46 @@ button { font-family: inherit; }
   cursor: not-allowed;
 }
 
+.icon-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.omegle-video-row {
+  display: flex;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.omegle-video-tile {
+  position: relative;
+  width: min(220px, 42vw);
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 10px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.omegle-video-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.omegle-video-label {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
 .omegle-wait-card { text-align: center; }
 .omegle-spinner {
   width: 40px;

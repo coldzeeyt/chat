@@ -132,6 +132,7 @@
         </div>
       </div>
       <div class="chat-header-right">
+        <button class="icon-btn hidden" id="btn-omegle-camera" title="Turn camera on">📷</button>
         <button class="btn btn-secondary hidden" id="btn-omegle-new">New</button>
         <button class="icon-btn hidden" id="btn-omegle-leave" title="Stop">✕</button>
         <button class="icon-btn" id="btn-invite" title="Copy invite link">🔗</button>
@@ -162,6 +163,17 @@
           </button>
         </div>
         <audio id="walkie-remote-audio" autoplay></audio>
+
+        <div class="omegle-video-row hidden" id="omegle-video-row">
+          <div class="omegle-video-tile hidden" id="omegle-self-tile">
+            <video id="omegle-self-video" autoplay muted playsinline></video>
+            <span class="omegle-video-label">You</span>
+          </div>
+          <div class="omegle-video-tile hidden" id="omegle-remote-tile">
+            <video id="omegle-remote-video" autoplay playsinline></video>
+            <span class="omegle-video-label">Stranger</span>
+          </div>
+        </div>
 
         <div class="messages" id="messages"></div>
 
