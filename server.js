@@ -72,7 +72,7 @@ const AVATAR_COLORS = ['#e15b5b', '#e1935b', '#d9b64c', '#6fbf6f', '#4cb8b0', '#
 const lastMessageAt = new Map(); // clientId -> timestamp, for slow mode
 const typingState = new Map(); // roomCode -> Set of display names currently typing
 const liveDrafts = new Map(); // roomCode -> Map(clientId -> { text, updatedAt })
-const lastLiveEmit = new Map(); // clientId -> timestamp, light rate limit
+const omegleQueue = []; // array of socket.id waiting for a random stranger
 
 function sanitize(text) {
   return String(text)
@@ -160,6 +160,7 @@ io.on('connection', (socket) => {
         closed: room.closed,
         liveMode: room.liveMode,
         maxMembers: room.maxMembers,
+        omegle: room.omegle,
         pinnedMessageId: room.pinnedMessageId,
         isOwner: socket.data.isOwner,
       },
@@ -188,6 +189,7 @@ io.on('connection', (socket) => {
     if (!code || !member) return cb && cb({ error: 'Not in a room' });
     const room = store.getRoom(code);
     if (!room || room.closed) return cb && cb({ error: 'Room unavailable' });
+    if (room.liveMode) return cb && cb({ error: 'Live mode rooms have no posting' });
 
     const text = String(body || '').trim();
     if (!text) return cb && cb({ error: 'Empty message' });
@@ -213,9 +215,6 @@ io.on('connection', (socket) => {
       reactions: {},
     });
     io.to(code).emit('new_message', publicMessage(message));
-    if (liveDrafts.has(code) && liveDrafts.get(code).delete(clientId)) {
-      socket.to(code).emit('live_typing_update', { clientId, text: '' });
-    }
     cb && cb({ ok: true, id: message.id });
   });
 
@@ -224,13 +223,9 @@ io.on('connection', (socket) => {
     const room = code && store.getRoom(code);
     if (!room || !room.liveMode || !member) return;
 
-    const now = Date.now();
-    if (now - (lastLiveEmit.get(clientId) || 0) < 25) return;
-    lastLiveEmit.set(clientId, now);
-
     const draft = String(text || '').slice(0, 2000);
     if (!liveDrafts.has(code)) liveDrafts.set(code, new Map());
-    liveDrafts.get(code).set(clientId, { text: draft, updatedAt: now });
+    liveDrafts.get(code).set(clientId, { text: draft, updatedAt: Date.now() });
     socket.to(code).emit('live_typing_update', { clientId, text: draft });
   });
 
@@ -334,9 +329,49 @@ io.on('connection', (socket) => {
     cb && cb({ ok: true });
   });
 
+  // ---------- Omegle (random stranger) mode ----------
+  socket.on('omegle_find', ({ clientId, displayName, avatarColor }, cb) => {
+    socket.data.pendingOmegle = {
+      clientId,
+      displayName: String(displayName || 'Guest').trim().slice(0, 24) || 'Guest',
+      avatarColor: AVATAR_COLORS.includes(avatarColor)
+        ? avatarColor
+        : AVATAR_COLORS[Math.abs(hashCode(clientId)) % AVATAR_COLORS.length],
+    };
+    if (!omegleQueue.includes(socket.id)) omegleQueue.push(socket.id);
+    cb && cb({ ok: true, status: 'waiting' });
+    tryMatchOmegle();
+  });
+
+  socket.on('omegle_skip', (_data, cb) => {
+    const member = socket.data.member;
+    leaveOmegleRoom(socket);
+    if (member) {
+      socket.data.pendingOmegle = { clientId: member.clientId, displayName: member.displayName, avatarColor: member.avatarColor };
+    }
+    if (!omegleQueue.includes(socket.id)) omegleQueue.push(socket.id);
+    cb && cb({ ok: true });
+    tryMatchOmegle();
+  });
+
+  socket.on('omegle_stop', (_data, cb) => {
+    const qIdx = omegleQueue.indexOf(socket.id);
+    if (qIdx !== -1) omegleQueue.splice(qIdx, 1);
+    leaveOmegleRoom(socket);
+    cb && cb({ ok: true });
+  });
+
   socket.on('disconnect', () => {
+    const qIdx = omegleQueue.indexOf(socket.id);
+    if (qIdx !== -1) omegleQueue.splice(qIdx, 1);
+
     const { code, member } = socket.data;
     if (!code || !member) return;
+    const room = store.getRoom(code);
+    if (room && room.omegle) {
+      leaveOmegleRoom(socket);
+      return;
+    }
     if (typingState.has(code)) {
       typingState.get(code).delete(member.clientId);
       socket.to(code).emit('typing_update', Array.from(typingState.get(code).values()));
@@ -363,6 +398,67 @@ io.on('connection', (socket) => {
   });
 });
 
+function tryMatchOmegle() {
+  while (omegleQueue.length >= 2) {
+    const aId = omegleQueue.shift();
+    const bId = omegleQueue.shift();
+    const a = io.sockets.sockets.get(aId);
+    const b = io.sockets.sockets.get(bId);
+    if (!a || !a.data.pendingOmegle) {
+      if (b && b.data.pendingOmegle) omegleQueue.unshift(bId);
+      continue;
+    }
+    if (!b || !b.data.pendingOmegle) {
+      omegleQueue.unshift(aId);
+      continue;
+    }
+    pairOmegle(a, b);
+  }
+}
+
+function pairOmegle(a, b) {
+  let code;
+  do {
+    code = generateCode();
+  } while (store.getRoom(code));
+
+  store.createRoom({ code, name: 'Stranger Chat', ownerToken: nanoid(24), maxMembers: 2, omegle: true });
+
+  [a, b].forEach((sock) => {
+    const pending = sock.data.pendingOmegle;
+    sock.data.code = code;
+    sock.data.clientId = pending.clientId;
+    sock.data.isOwner = false;
+    sock.data.member = { clientId: pending.clientId, displayName: pending.displayName, avatarColor: pending.avatarColor, isOwner: false };
+    sock.data.pendingOmegle = null;
+    sock.join(code);
+  });
+
+  const room = store.getRoom(code);
+  [a, b].forEach((sock) => {
+    sock.emit('omegle_matched', { room: publicRoom(room), members: presenceList(code) });
+  });
+}
+
+function leaveOmegleRoom(socket) {
+  const { code, member } = socket.data;
+  if (!code || !member) return;
+  const room = store.getRoom(code);
+  if (!room || !room.omegle) return;
+
+  socket.leave(code);
+  socket.to(code).emit('omegle_partner_left');
+  socket.data.code = null;
+  socket.data.member = null;
+  if (typingState.has(code)) typingState.get(code).delete(member.clientId);
+  if (liveDrafts.has(code)) liveDrafts.delete(code);
+  broadcastPresence(code);
+
+  setImmediate(() => {
+    if (presenceList(code).length === 0) store.deleteRoom(code);
+  });
+}
+
 function publicRoom(room) {
   return {
     code: room.code,
@@ -372,6 +468,7 @@ function publicRoom(room) {
     closed: room.closed,
     liveMode: room.liveMode,
     maxMembers: room.maxMembers,
+    omegle: room.omegle,
     pinnedMessageId: room.pinnedMessageId,
   };
 }

@@ -49,7 +49,12 @@
 
   // ---------- DOM helpers ----------
   const $ = (sel) => document.querySelector(sel);
-  const views = { home: $('#view-home'), entry: $('#view-entry'), chat: $('#view-chat') };
+  const views = {
+    home: $('#view-home'),
+    entry: $('#view-entry'),
+    chat: $('#view-chat'),
+    omegleWait: $('#view-omegle-wait'),
+  };
   function showView(name) {
     Object.values(views).forEach((v) => v.classList.add('hidden'));
     views[name].classList.remove('hidden');
@@ -245,16 +250,34 @@
 
   function enterChat() {
     showView('chat');
+    selfLiveDraft = '';
     document.documentElement.style.setProperty('--accent', room.accent);
-    $('#chat-room-name').textContent = room.name;
-    $('#chat-code-pill').textContent = room.code;
-    $('#chat-live-pill').classList.toggle('hidden', !room.liveMode);
-    $('#typing-row').classList.toggle('hidden', !!room.liveMode);
-    $('#composer-input').placeholder = room.liveMode ? 'Type to broadcast live… press Enter to post' : 'Message… (try /me or /shrug)';
+    $('#chat-room-name').textContent = room.omegle ? 'Stranger Chat' : room.name;
+    $('#chat-code-pill').classList.toggle('hidden', !!room.omegle);
+    if (!room.omegle) $('#chat-code-pill').textContent = room.code;
+    $('#btn-members-toggle').classList.toggle('hidden', !!room.omegle);
+    $('#btn-invite').classList.toggle('hidden', !!room.omegle);
+    $('#btn-settings').classList.toggle('hidden', !!room.omegle);
+    $('#btn-omegle-new').classList.toggle('hidden', !room.omegle);
+    $('#btn-omegle-leave').classList.toggle('hidden', !room.omegle);
+    $('#sidebar').classList.toggle('hidden', !!room.omegle);
+    $('#sidebar').classList.remove('open');
     renderMessages();
     renderMembers();
     renderPinned();
-    renderLivePanel();
+    applyLiveModeVisibility();
+  }
+
+  function applyLiveModeVisibility() {
+    const isLive = !!(room && room.liveMode);
+    $('#chat-live-pill').classList.toggle('hidden', !isLive);
+    $('#messages').classList.toggle('hidden', isLive);
+    $('#composer').classList.toggle('hidden', isLive);
+    $('#typing-row').classList.toggle('hidden', isLive);
+    $('#live-grid').classList.toggle('hidden', !isLive);
+    if (isLive) $('#pinned-bar').classList.add('hidden');
+    $('#composer-input').placeholder = room && room.omegle ? 'Say hi…' : 'Message… (try /me or /shrug)';
+    if (isLive) renderLiveGrid();
   }
 
   $('#chat-code-pill').addEventListener('click', () => {
@@ -268,6 +291,55 @@
 
   // ---------- Message rendering ----------
   const messagesEl = $('#messages');
+
+  // ---------- Omegle (random stranger) mode ----------
+  $('#btn-omegle-start').addEventListener('click', () => {
+    showView('omegleWait');
+    $('#omegle-wait-title').textContent = 'Looking for someone…';
+    $('#omegle-wait-text').textContent = 'Hang tight, connecting you with a stranger.';
+    socket.emit('omegle_find', { clientId, displayName: profile.displayName || 'Guest', avatarColor: profile.avatarColor });
+  });
+
+  $('#omegle-wait-back').addEventListener('click', () => {
+    socket.emit('omegle_stop');
+    goHome();
+  });
+
+  $('#btn-omegle-new').addEventListener('click', () => {
+    socket.emit('omegle_skip');
+    showView('omegleWait');
+    $('#omegle-wait-title').textContent = 'Looking for someone…';
+    $('#omegle-wait-text').textContent = 'Finding you a new stranger.';
+  });
+
+  $('#btn-omegle-leave').addEventListener('click', () => {
+    socket.emit('omegle_stop');
+    room = null;
+    goHome();
+  });
+
+  socket.on('omegle_matched', (payload) => {
+    room = payload.room;
+    messages = [];
+    members = payload.members;
+    liveDrafts = {};
+    enterChat();
+    appendSystemNotice("You're now chatting with a stranger. Say hi!");
+    toast("You're connected with a stranger");
+  });
+
+  socket.on('omegle_partner_left', () => {
+    appendSystemNotice('Stranger has disconnected. Click "New" to find someone else.');
+    toast('Stranger has disconnected');
+  });
+
+  function appendSystemNotice(text) {
+    const div = document.createElement('div');
+    div.className = 'system-msg';
+    div.textContent = text;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
 
   function renderMessages() {
     messagesEl.innerHTML = '';
@@ -295,6 +367,15 @@
       .join('')}</div>`;
   }
 
+  function identityFor(m) {
+    if (room && room.omegle && m.clientId !== 'system') {
+      return m.clientId === clientId
+        ? { name: 'You', color: room.accent, initials: 'Y' }
+        : { name: 'Stranger', color: '#8a8d99', initials: 'S' };
+    }
+    return { name: m.authorName, color: m.authorColor, initials: initials(m.authorName) };
+  }
+
   function appendMessageEl(m, prev, container) {
     container = container || messagesEl;
     if (m.type === 'system') {
@@ -307,6 +388,8 @@
     }
 
     const isCompactGroup = sameGroup(prev, m);
+    const identity = identityFor(m);
+    const isOmegle = !!(room && room.omegle);
 
     const group = document.createElement('div');
     group.className = 'msg-group' + (isCompactGroup ? ' compact' : '');
@@ -314,25 +397,22 @@
 
     const avatarHtml = isCompactGroup
       ? `<div class="msg-avatar spacer"></div>`
-      : `<div class="msg-avatar" style="background:${m.authorColor}">${initials(m.authorName)}</div>`;
+      : `<div class="msg-avatar" style="background:${identity.color}">${identity.initials}</div>`;
 
-    const canEdit = m.clientId === clientId && !m.deleted && m.type !== 'system';
-    const canDelete = (m.clientId === clientId || (room && room.isOwner)) && !m.deleted;
-    const canPin = room && room.isOwner && !m.deleted;
+    const canEdit = !isOmegle && m.clientId === clientId && !m.deleted && m.type !== 'system';
+    const canDelete = !isOmegle && (m.clientId === clientId || (room && room.isOwner)) && !m.deleted;
+    const canPin = !isOmegle && room && room.isOwner && !m.deleted;
 
-    const actionPrefix = m.type === 'action' ? `${escapeHtml(m.authorName)} ` : '';
+    const actionPrefix = m.type === 'action' ? `${escapeHtml(identity.name)} ` : '';
     const bodyHtml = m.deleted
       ? `<span class="msg-bubble deleted">message deleted</span>`
       : `<span class="msg-bubble ${m.type === 'action' ? 'action' : ''}">${actionPrefix}${m.html}</span>${
           m.editedAt ? '<span class="msg-edited-tag">(edited)</span>' : ''
         }`;
 
-    group.innerHTML = `
-      ${avatarHtml}
-      <div class="msg-content">
-        ${isCompactGroup ? '' : `<div class="msg-meta"><span class="msg-author" style="color:${m.authorColor}">${escapeHtml(m.authorName)}</span><span class="msg-time">${formatTime(m.createdAt)}</span></div>`}
-        <div class="msg-line" data-id="${m.id}">
-          ${bodyHtml}
+    const actionsHtml = isOmegle
+      ? ''
+      : `
           <div class="msg-actions">
             <button data-act="react" title="React">🙂</button>
             ${canEdit ? '<button data-act="edit" title="Edit">✎</button>' : ''}
@@ -340,8 +420,17 @@
             ${canPin ? `<button data-act="pin" title="${room.pinnedMessageId === m.id ? 'Unpin' : 'Pin'}">📌</button>` : ''}
           </div>
           <div class="emoji-picker">${QUICK_EMOJI.map((e) => `<button data-emoji="${e}">${e}</button>`).join('')}</div>
+        `;
+
+    group.innerHTML = `
+      ${avatarHtml}
+      <div class="msg-content">
+        ${isCompactGroup ? '' : `<div class="msg-meta"><span class="msg-author" style="color:${identity.color}">${escapeHtml(identity.name)}</span><span class="msg-time">${formatTime(m.createdAt)}</span></div>`}
+        <div class="msg-line" data-id="${m.id}">
+          ${bodyHtml}
+          ${actionsHtml}
         </div>
-        ${reactionsHtml(m)}
+        ${isOmegle ? '' : reactionsHtml(m)}
       </div>
     `;
     container.appendChild(group);
@@ -370,11 +459,6 @@
   let typingTimeout = null;
 
   composerInput.addEventListener('input', () => {
-    if (room && room.liveMode) {
-      socket.emit('live_typing', { text: composerInput.value });
-      renderLivePanel();
-      return;
-    }
     socket.emit('typing', { isTyping: true });
     clearTimeout(typingTimeout);
     typingTimeout = setTimeout(() => socket.emit('typing', { isTyping: false }), 1500);
@@ -405,8 +489,7 @@
       if (res && res.error) toast(res.error);
     });
     composerInput.value = '';
-    if (room && room.liveMode) renderLivePanel();
-    else socket.emit('typing', { isTyping: false });
+    socket.emit('typing', { isTyping: false });
   });
 
   messagesEl.addEventListener('click', (e) => {
@@ -479,47 +562,71 @@
   }
   $('#btn-unpin').addEventListener('click', () => socket.emit('pin_message', { id: null }));
 
-  // ---------- Live mode (Talkomatic-style live typing) ----------
-  function renderLivePanel() {
-    const panel = $('#live-panel');
+  // ---------- Live mode (Talkomatic-style: no posting, just live typing) ----------
+  let selfLiveDraft = '';
+
+  function renderLiveGrid() {
+    const grid = $('#live-grid');
     if (!room || !room.liveMode) {
-      panel.classList.add('hidden');
-      panel.innerHTML = '';
+      grid.innerHTML = '';
       return;
     }
-    panel.classList.remove('hidden');
-    panel.innerHTML = members
-      .map((m) => {
-        const isSelf = m.clientId === clientId;
-        const text = isSelf ? composerInput.value : liveDrafts[m.clientId] || '';
-        return `
-          <div class="live-box${isSelf ? ' live-box-self' : ''}">
-            <div class="live-box-head">
-              <span class="member-avatar" style="background:${m.avatarColor}">${initials(m.displayName)}</span>
-              <span>${escapeHtml(m.displayName)}${isSelf ? ' (you)' : ''}</span>
-            </div>
-            <div class="live-box-text">${escapeHtml(text)}<span class="live-cursor"></span></div>
+    const currentIds = new Set(members.map((m) => m.clientId));
+    grid.querySelectorAll('.live-box').forEach((el) => {
+      if (!currentIds.has(el.dataset.clientId)) el.remove();
+    });
+
+    members.forEach((m) => {
+      const isSelf = m.clientId === clientId;
+      let box = grid.querySelector(`.live-box[data-client-id="${CSS.escape(m.clientId)}"]`);
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'live-box' + (isSelf ? ' live-box-self' : '');
+        box.dataset.clientId = m.clientId;
+        box.innerHTML = `
+          <div class="live-box-head">
+            <span class="member-avatar" style="background:${m.avatarColor}">${initials(m.displayName)}</span>
+            <span class="live-box-name"></span>
           </div>
+          ${isSelf
+            ? `<textarea class="live-box-input" maxlength="2000" placeholder="Start typing…"></textarea>`
+            : `<div class="live-box-text"></div>`}
         `;
-      })
-      .join('');
+        grid.appendChild(box);
+        if (isSelf) {
+          const textarea = box.querySelector('.live-box-input');
+          textarea.value = selfLiveDraft;
+          textarea.addEventListener('input', () => {
+            selfLiveDraft = textarea.value;
+            socket.emit('live_typing', { text: selfLiveDraft });
+          });
+        }
+      }
+      box.querySelector('.live-box-name').textContent = m.displayName + (isSelf ? ' (you)' : '');
+      if (!isSelf) {
+        const textEl = box.querySelector('.live-box-text');
+        const text = liveDrafts[m.clientId] || '';
+        textEl.innerHTML = `${escapeHtml(text)}<span class="live-cursor"></span>`;
+      }
+    });
   }
 
   socket.on('live_typing_update', ({ clientId: cid, text }) => {
     if (text) liveDrafts[cid] = text;
     else delete liveDrafts[cid];
-    renderLivePanel();
+    renderLiveGrid();
   });
 
   socket.on('live_typing_cleared', () => {
     liveDrafts = {};
-    renderLivePanel();
+    renderLiveGrid();
   });
 
   // ---------- Typing indicator ----------
   socket.on('typing_update', (names) => {
     const row = $('#typing-row');
     if (!names.length) return (row.textContent = '');
+    if (room && room.omegle) return (row.textContent = 'Stranger is typing…');
     row.textContent = names.length === 1 ? `${names[0]} is typing…` : `${names.join(', ')} are typing…`;
   });
 
@@ -543,19 +650,16 @@
     const activeIds = new Set(members.map((m) => m.clientId));
     Object.keys(liveDrafts).forEach((id) => { if (!activeIds.has(id)) delete liveDrafts[id]; });
     renderMembers();
-    renderLivePanel();
+    if (room && room.liveMode) renderLiveGrid();
   });
 
   socket.on('room_updated', (r) => {
     room = Object.assign(room || {}, r);
     document.documentElement.style.setProperty('--accent', room.accent);
-    $('#chat-room-name').textContent = room.name;
-    $('#chat-live-pill').classList.toggle('hidden', !room.liveMode);
-    $('#typing-row').classList.toggle('hidden', !!room.liveMode);
-    $('#composer-input').placeholder = room.liveMode ? 'Type to broadcast live… press Enter to post' : 'Message… (try /me or /shrug)';
+    $('#chat-room-name').textContent = room.omegle ? 'Stranger Chat' : room.name;
     renderMembers();
     renderPinned();
-    renderLivePanel();
+    applyLiveModeVisibility();
   });
 
   socket.on('disconnect', () => toast('Disconnected — reconnecting…'));

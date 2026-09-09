@@ -65,6 +65,24 @@
           <button id="btn-join" class="btn btn-secondary">Continue</button>
           <p class="hint">Got an invite link? Just open it — it'll skip this step.</p>
         </div>
+
+        <div class="card">
+          <h2>Talk to a stranger</h2>
+          <p class="muted card-copy">Get matched with someone at random for a one-on-one chat. No name, no history — just say hi.</p>
+          <button id="btn-omegle-start" class="btn btn-secondary">Start chatting</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== OMEGLE WAITING SCREEN ===== -->
+  <section id="view-omegle-wait" class="view hidden">
+    <div class="entry-wrap">
+      <button class="link-back" id="omegle-wait-back">&larr; Back</button>
+      <div class="entry-card card omegle-wait-card">
+        <div class="omegle-spinner" aria-hidden="true"></div>
+        <h2 id="omegle-wait-title">Looking for someone…</h2>
+        <p class="muted" id="omegle-wait-text">Hang tight, connecting you with a stranger.</p>
       </div>
     </div>
   </section>
@@ -109,6 +127,8 @@
         </div>
       </div>
       <div class="chat-header-right">
+        <button class="btn btn-secondary hidden" id="btn-omegle-new">New</button>
+        <button class="icon-btn hidden" id="btn-omegle-leave" title="Stop">✕</button>
         <button class="icon-btn" id="btn-invite" title="Copy invite link">🔗</button>
         <button class="icon-btn" id="btn-settings" title="Settings">⚙</button>
       </div>
@@ -127,7 +147,7 @@
           <button class="icon-btn small" id="btn-unpin" title="Unpin">✕</button>
         </div>
 
-        <div class="live-panel hidden" id="live-panel"></div>
+        <div class="live-grid hidden" id="live-grid"></div>
 
         <div class="messages" id="messages"></div>
 
