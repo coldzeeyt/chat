@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chatroom</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💬</text></svg>" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+
+  <!-- ===== HOME SCREEN ===== -->
+  <section id="view-home" class="view">
+    <div class="home-wrap">
+      <div class="brand">
+        <span class="brand-mark">●</span>
+        <h1>Chatroom</h1>
+      </div>
+      <p class="tagline">Simple, private rooms. No accounts, just a code.</p>
+
+      <div class="card-row">
+        <div class="card">
+          <h2>Create a room</h2>
+          <label class="field">
+            <span>Room name</span>
+            <input id="create-name" type="text" maxlength="60" placeholder="e.g. Movie Night" />
+          </label>
+          <label class="field">
+            <span>Password <em>(optional)</em></span>
+            <input id="create-password" type="password" maxlength="60" placeholder="Leave blank for none" />
+          </label>
+          <label class="field">
+            <span>Accent color</span>
+            <div class="swatches" id="create-swatches"></div>
+          </label>
+          <button id="btn-create" class="btn btn-primary">Create room</button>
+        </div>
+
+        <div class="card">
+          <h2>Join a room</h2>
+          <label class="field">
+            <span>Room code</span>
+            <input id="join-code" type="text" maxlength="8" placeholder="e.g. K7M2QX" autocapitalize="characters" />
+          </label>
+          <button id="btn-join" class="btn btn-secondary">Continue</button>
+          <p class="hint">Got an invite link? Just open it — it'll skip this step.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== NAME / ENTRY SCREEN ===== -->
+  <section id="view-entry" class="view hidden">
+    <div class="entry-wrap">
+      <button class="link-back" id="entry-back">&larr; Back</button>
+      <div class="entry-card card">
+        <h2 id="entry-room-name">Room</h2>
+        <p class="muted" id="entry-room-meta"></p>
+        <label class="field">
+          <span>Your display name</span>
+          <input id="entry-display-name" type="text" maxlength="24" placeholder="e.g. Alex" />
+        </label>
+        <label class="field" id="entry-password-field">
+          <span>Room password</span>
+          <input id="entry-password" type="password" maxlength="60" placeholder="Required to join" />
+        </label>
+        <label class="field">
+          <span>Your color</span>
+          <div class="swatches" id="entry-swatches"></div>
+        </label>
+        <button id="btn-enter" class="btn btn-primary">Enter room</button>
+        <p class="error" id="entry-error"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== CHAT SCREEN ===== -->
+  <section id="view-chat" class="view hidden">
+    <header class="chat-header">
+      <div class="chat-header-left">
+        <button class="icon-btn" id="btn-members-toggle" title="Members" aria-label="Members">☰</button>
+        <div>
+          <h1 id="chat-room-name">Room</h1>
+          <div class="chat-sub">
+            <span id="chat-code-pill" class="pill" title="Room code">CODE</span>
+            <span id="chat-online-count" class="muted"></span>
+          </div>
+        </div>
+      </div>
+      <div class="chat-header-right">
+        <button class="icon-btn" id="btn-invite" title="Copy invite link">🔗</button>
+        <button class="icon-btn" id="btn-settings" title="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div class="chat-body">
+      <aside class="sidebar" id="sidebar">
+        <h3>Members</h3>
+        <ul id="member-list" class="member-list"></ul>
+      </aside>
+
+      <main class="chat-main">
+        <div class="pinned-bar hidden" id="pinned-bar">
+          <span class="pinned-icon">📌</span>
+          <span class="pinned-text" id="pinned-text"></span>
+          <button class="icon-btn small" id="btn-unpin" title="Unpin">✕</button>
+        </div>
+
+        <div class="messages" id="messages"></div>
+
+        <div class="typing-row" id="typing-row"></div>
+
+        <form id="composer" class="composer" autocomplete="off">
+          <input id="composer-input" type="text" maxlength="2000" placeholder="Message… (try /me or /shrug)" />
+          <button type="submit" class="btn btn-primary composer-send">Send</button>
+        </form>
+      </main>
+    </div>
+  </section>
+
+  <!-- ===== SETTINGS MODAL ===== -->
+  <div class="modal-backdrop hidden" id="settings-backdrop">
+    <div class="modal">
+      <div class="modal-tabs">
+        <button class="modal-tab active" data-tab="you">You</button>
+        <button class="modal-tab" data-tab="room">Room</button>
+      </div>
+
+      <div class="modal-panel" id="tab-you">
+        <label class="field">
+          <span>Display name</span>
+          <input id="settings-name" type="text" maxlength="24" />
+        </label>
+        <label class="field">
+          <span>Your color</span>
+          <div class="swatches" id="settings-swatches"></div>
+        </label>
+        <label class="field">
+          <span>Theme</span>
+          <select id="settings-theme">
+            <option value="system">Match system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+        <label class="field field-row">
+          <span>Compact messages</span>
+          <input id="settings-compact" type="checkbox" />
+        </label>
+        <label class="field field-row">
+          <span>Notification sound</span>
+          <input id="settings-sound" type="checkbox" checked />
+        </label>
+      </div>
+
+      <div class="modal-panel hidden" id="tab-room">
+        <p class="owner-only-notice hidden" id="not-owner-notice">Only the room creator can change these settings.</p>
+        <label class="field">
+          <span>Room name</span>
+          <input id="room-settings-name" type="text" maxlength="60" />
+        </label>
+        <label class="field">
+          <span>Accent color</span>
+          <div class="swatches" id="room-settings-swatches"></div>
+        </label>
+        <label class="field">
+          <span>Slow mode <em>(seconds between messages, 0 = off)</em></span>
+          <input id="room-settings-slowmode" type="number" min="0" max="120" />
+        </label>
+        <label class="field field-row">
+          <span>Close room to new members</span>
+          <input id="room-settings-closed" type="checkbox" />
+        </label>
+        <button id="btn-save-room" class="btn btn-primary">Save room settings</button>
+      </div>
+
+      <button class="modal-close" id="settings-close">Done</button>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
