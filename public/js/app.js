@@ -123,16 +123,33 @@
   let createAccent = ROOM_ACCENTS[0];
   renderSwatches($('#create-swatches'), createAccent, (c) => (createAccent = c), ROOM_ACCENTS);
 
+  document.querySelectorAll('.create-tabs .modal-tab').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.create-tabs .modal-tab').forEach((t) => t.classList.remove('active'));
+      btn.classList.add('active');
+      $('#create-panel-room').classList.toggle('hidden', btn.dataset.createTab !== 'room');
+      $('#create-panel-settings').classList.toggle('hidden', btn.dataset.createTab !== 'settings');
+    });
+  });
+
   $('#btn-create').addEventListener('click', async () => {
     const name = $('#create-name').value.trim();
     const password = $('#create-password').value;
+    const maxMembers = parseInt($('#create-max-members').value, 10);
+    const liveMode = $('#create-live-mode').checked;
     const btn = $('#btn-create');
     btn.disabled = true;
     try {
       const res = await fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, password: password || undefined, accent: createAccent }),
+        body: JSON.stringify({
+          name,
+          password: password || undefined,
+          accent: createAccent,
+          liveMode,
+          maxMembers: Number.isFinite(maxMembers) ? maxMembers : undefined,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not create room');
@@ -179,7 +196,10 @@
         return;
       }
       $('#entry-room-name').textContent = data.name;
-      $('#entry-room-meta').textContent = `${data.memberCount} online${data.closed ? ' · closed to new members' : ''}`;
+      const bits = [data.maxMembers ? `${data.memberCount}/${data.maxMembers} online` : `${data.memberCount} online`];
+      if (data.liveMode) bits.push('live mode');
+      if (data.closed) bits.push('closed to new members');
+      $('#entry-room-meta').textContent = bits.join(' · ');
       $('#entry-password-field').classList.toggle('hidden', !data.hasPassword || hasOwnerToken);
     } catch {
       $('#entry-room-meta').textContent = '';
@@ -199,9 +219,10 @@
 
   // ---------- Socket / chat state ----------
   const socket = io();
-  let room = null; // {code, name, accent, slowMode, closed, pinnedMessageId, isOwner}
+  let room = null; // {code, name, accent, slowMode, closed, liveMode, maxMembers, pinnedMessageId, isOwner}
   let messages = [];
   let members = [];
+  let liveDrafts = {}; // clientId -> in-progress text, for members other than self
 
   function joinRoom(code, password) {
     const ownerToken = localStorage.getItem(ownerTokenKey(code)) || undefined;
@@ -216,6 +237,7 @@
         room = res.room;
         messages = res.messages;
         members = res.members;
+        liveDrafts = res.liveDrafts || {};
         enterChat();
       }
     );
@@ -226,9 +248,13 @@
     document.documentElement.style.setProperty('--accent', room.accent);
     $('#chat-room-name').textContent = room.name;
     $('#chat-code-pill').textContent = room.code;
+    $('#chat-live-pill').classList.toggle('hidden', !room.liveMode);
+    $('#typing-row').classList.toggle('hidden', !!room.liveMode);
+    $('#composer-input').placeholder = room.liveMode ? 'Type to broadcast live… press Enter to post' : 'Message… (try /me or /shrug)';
     renderMessages();
     renderMembers();
     renderPinned();
+    renderLivePanel();
   }
 
   $('#chat-code-pill').addEventListener('click', () => {
@@ -344,6 +370,11 @@
   let typingTimeout = null;
 
   composerInput.addEventListener('input', () => {
+    if (room && room.liveMode) {
+      socket.emit('live_typing', { text: composerInput.value });
+      renderLivePanel();
+      return;
+    }
     socket.emit('typing', { isTyping: true });
     clearTimeout(typingTimeout);
     typingTimeout = setTimeout(() => socket.emit('typing', { isTyping: false }), 1500);
@@ -374,7 +405,8 @@
       if (res && res.error) toast(res.error);
     });
     composerInput.value = '';
-    socket.emit('typing', { isTyping: false });
+    if (room && room.liveMode) renderLivePanel();
+    else socket.emit('typing', { isTyping: false });
   });
 
   messagesEl.addEventListener('click', (e) => {
@@ -431,7 +463,9 @@
       `;
       list.appendChild(li);
     });
-    $('#chat-online-count').textContent = `${members.length} online`;
+    $('#chat-online-count').textContent = room && room.maxMembers
+      ? `${members.length}/${room.maxMembers} online`
+      : `${members.length} online`;
   }
 
   // ---------- Pinned bar ----------
@@ -445,8 +479,44 @@
   }
   $('#btn-unpin').addEventListener('click', () => socket.emit('pin_message', { id: null }));
 
+  // ---------- Live mode (Talkomatic-style live typing) ----------
+  function renderLivePanel() {
+    const panel = $('#live-panel');
+    if (!room || !room.liveMode) {
+      panel.classList.add('hidden');
+      panel.innerHTML = '';
+      return;
+    }
+    panel.classList.remove('hidden');
+    panel.innerHTML = members
+      .map((m) => {
+        const isSelf = m.clientId === clientId;
+        const text = isSelf ? composerInput.value : liveDrafts[m.clientId] || '';
+        return `
+          <div class="live-box${isSelf ? ' live-box-self' : ''}">
+            <div class="live-box-head">
+              <span class="member-avatar" style="background:${m.avatarColor}">${initials(m.displayName)}</span>
+              <span>${escapeHtml(m.displayName)}${isSelf ? ' (you)' : ''}</span>
+            </div>
+            <div class="live-box-text">${escapeHtml(text)}<span class="live-cursor"></span></div>
+          </div>
+        `;
+      })
+      .join('');
+  }
+
+  socket.on('live_typing_update', ({ clientId: cid, text }) => {
+    if (text) liveDrafts[cid] = text;
+    else delete liveDrafts[cid];
+    renderLivePanel();
+  });
+
+  socket.on('live_typing_cleared', () => {
+    liveDrafts = {};
+    renderLivePanel();
+  });
+
   // ---------- Typing indicator ----------
-  $('#typing-row');
   socket.on('typing_update', (names) => {
     const row = $('#typing-row');
     if (!names.length) return (row.textContent = '');
@@ -470,14 +540,22 @@
 
   socket.on('presence_update', (list) => {
     members = list;
+    const activeIds = new Set(members.map((m) => m.clientId));
+    Object.keys(liveDrafts).forEach((id) => { if (!activeIds.has(id)) delete liveDrafts[id]; });
     renderMembers();
+    renderLivePanel();
   });
 
   socket.on('room_updated', (r) => {
     room = Object.assign(room || {}, r);
     document.documentElement.style.setProperty('--accent', room.accent);
     $('#chat-room-name').textContent = room.name;
+    $('#chat-live-pill').classList.toggle('hidden', !room.liveMode);
+    $('#typing-row').classList.toggle('hidden', !!room.liveMode);
+    $('#composer-input').placeholder = room.liveMode ? 'Type to broadcast live… press Enter to post' : 'Message… (try /me or /shrug)';
+    renderMembers();
     renderPinned();
+    renderLivePanel();
   });
 
   socket.on('disconnect', () => toast('Disconnected — reconnecting…'));
@@ -497,13 +575,22 @@
 
     const isOwner = room && room.isOwner;
     $('#not-owner-notice').classList.toggle('hidden', !!isOwner);
-    ['#room-settings-name', '#room-settings-slowmode', '#room-settings-closed', '#btn-save-room'].forEach((sel) => {
+    [
+      '#room-settings-name',
+      '#room-settings-slowmode',
+      '#room-settings-max-members',
+      '#room-settings-closed',
+      '#room-settings-live-mode',
+      '#btn-save-room',
+    ].forEach((sel) => {
       $(sel).disabled = !isOwner;
     });
     if (room) {
       $('#room-settings-name').value = room.name;
       $('#room-settings-slowmode').value = room.slowMode || 0;
+      $('#room-settings-max-members').value = room.maxMembers || 0;
       $('#room-settings-closed').checked = !!room.closed;
+      $('#room-settings-live-mode').checked = !!room.liveMode;
       renderSwatches($('#room-settings-swatches'), room.accent, (c) => {
         if (isOwner) $('#room-settings-swatches').dataset.picked = c;
       }, ROOM_ACCENTS);
@@ -548,7 +635,9 @@
       {
         name: $('#room-settings-name').value,
         slowMode: Number($('#room-settings-slowmode').value) || 0,
+        maxMembers: Number($('#room-settings-max-members').value) || 0,
         closed: $('#room-settings-closed').checked,
+        liveMode: $('#room-settings-live-mode').checked,
         accent: $('#room-settings-swatches').dataset.picked,
       },
       (res) => {

@@ -19,20 +19,40 @@
       <p class="tagline">Simple, private rooms. No accounts, just a code.</p>
 
       <div class="card-row">
-        <div class="card">
+        <div class="card card-create">
           <h2>Create a room</h2>
-          <label class="field">
-            <span>Room name</span>
-            <input id="create-name" type="text" maxlength="60" placeholder="e.g. Movie Night" />
-          </label>
-          <label class="field">
-            <span>Password <em>(optional)</em></span>
-            <input id="create-password" type="password" maxlength="60" placeholder="Leave blank for none" />
-          </label>
-          <label class="field">
-            <span>Accent color</span>
-            <div class="swatches" id="create-swatches"></div>
-          </label>
+
+          <div class="create-tabs">
+            <button type="button" class="modal-tab active" data-create-tab="room">Room</button>
+            <button type="button" class="modal-tab" data-create-tab="settings">Settings</button>
+          </div>
+
+          <div class="create-panel" id="create-panel-room">
+            <label class="field">
+              <span>Room name</span>
+              <input id="create-name" type="text" maxlength="60" placeholder="e.g. Movie Night" />
+            </label>
+            <label class="field">
+              <span>Accent color</span>
+              <div class="swatches" id="create-swatches"></div>
+            </label>
+          </div>
+
+          <div class="create-panel hidden" id="create-panel-settings">
+            <label class="field">
+              <span>Password <em>(optional)</em></span>
+              <input id="create-password" type="password" maxlength="60" placeholder="Leave blank for none" />
+            </label>
+            <label class="field">
+              <span>Person limit <em>(optional)</em></span>
+              <input id="create-max-members" type="number" min="2" max="200" placeholder="No limit" />
+            </label>
+            <label class="field field-row field-live">
+              <span>Live mode <em>— see everyone type in real time</em></span>
+              <input id="create-live-mode" type="checkbox" />
+            </label>
+          </div>
+
           <button id="btn-create" class="btn btn-primary">Create room</button>
         </div>
 
@@ -83,6 +103,7 @@
           <h1 id="chat-room-name">Room</h1>
           <div class="chat-sub">
             <span id="chat-code-pill" class="pill" title="Room code">CODE</span>
+            <span id="chat-live-pill" class="pill pill-live hidden" title="Live mode: everyone sees typing in real time">LIVE</span>
             <span id="chat-online-count" class="muted"></span>
           </div>
         </div>
@@ -106,6 +127,8 @@
           <button class="icon-btn small" id="btn-unpin" title="Unpin">✕</button>
         </div>
 
+        <div class="live-panel hidden" id="live-panel"></div>
+
         <div class="messages" id="messages"></div>
 
         <div class="typing-row" id="typing-row"></div>
@@ -121,6 +144,7 @@
   <!-- ===== SETTINGS MODAL ===== -->
   <div class="modal-backdrop hidden" id="settings-backdrop">
     <div class="modal">
+      <h2 class="modal-title">Settings</h2>
       <div class="modal-tabs">
         <button class="modal-tab active" data-tab="you">You</button>
         <button class="modal-tab" data-tab="room">Room</button>
@@ -167,9 +191,17 @@
           <span>Slow mode <em>(seconds between messages, 0 = off)</em></span>
           <input id="room-settings-slowmode" type="number" min="0" max="120" />
         </label>
+        <label class="field">
+          <span>Person limit <em>(0 = no limit)</em></span>
+          <input id="room-settings-max-members" type="number" min="0" max="200" />
+        </label>
         <label class="field field-row">
           <span>Close room to new members</span>
           <input id="room-settings-closed" type="checkbox" />
+        </label>
+        <label class="field field-row field-live">
+          <span>Live mode <em>— see everyone type in real time</em></span>
+          <input id="room-settings-live-mode" type="checkbox" />
         </label>
         <button id="btn-save-room" class="btn btn-primary">Save room settings</button>
       </div>

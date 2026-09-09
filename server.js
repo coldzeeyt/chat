@@ -19,7 +19,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 // ---------- REST API ----------
 
 app.post('/api/rooms', (req, res) => {
-  const { name, password, accent } = req.body || {};
+  const { name, password, accent, liveMode, maxMembers } = req.body || {};
   const roomName = (name || '').trim().slice(0, 60) || 'Untitled Room';
 
   let code;
@@ -28,10 +28,14 @@ app.post('/api/rooms', (req, res) => {
   } while (store.getRoom(code));
 
   const ownerToken = nanoid(24);
-  store.createRoom({ code, name: roomName, password, ownerToken, accent });
+  store.createRoom({ code, name: roomName, password, ownerToken, accent, liveMode: !!liveMode, maxMembers: Number(maxMembers) });
 
   res.json({ code, ownerToken });
 });
+
+function memberCount(code) {
+  return (io.sockets.adapter.rooms.get(code) || new Set()).size;
+}
 
 app.get('/api/rooms/:code', (req, res) => {
   const room = store.getRoom(req.params.code.toUpperCase());
@@ -42,7 +46,9 @@ app.get('/api/rooms/:code', (req, res) => {
     accent: room.accent,
     hasPassword: !!room.passwordHash,
     closed: room.closed,
-    memberCount: (io.sockets.adapter.rooms.get(room.code) || new Set()).size,
+    liveMode: room.liveMode,
+    maxMembers: room.maxMembers,
+    memberCount: memberCount(room.code),
   });
 });
 
@@ -50,6 +56,9 @@ app.post('/api/rooms/:code/join', (req, res) => {
   const room = store.getRoom(req.params.code.toUpperCase());
   if (!room) return res.status(404).json({ error: 'Room not found' });
   if (room.closed) return res.status(403).json({ error: 'This room is closed' });
+  if (room.maxMembers && memberCount(room.code) >= room.maxMembers) {
+    return res.status(403).json({ error: 'This room is full' });
+  }
   const { password } = req.body || {};
   if (room.passwordHash && !store.verifyPassword(password || '', room.passwordHash)) {
     return res.status(401).json({ error: 'Incorrect password' });
@@ -62,6 +71,8 @@ app.post('/api/rooms/:code/join', (req, res) => {
 const AVATAR_COLORS = ['#e15b5b', '#e1935b', '#d9b64c', '#6fbf6f', '#4cb8b0', '#5b8de1', '#7d6fe0', '#c15be0', '#e05b93'];
 const lastMessageAt = new Map(); // clientId -> timestamp, for slow mode
 const typingState = new Map(); // roomCode -> Set of display names currently typing
+const liveDrafts = new Map(); // roomCode -> Map(clientId -> { text, updatedAt })
+const lastLiveEmit = new Map(); // clientId -> timestamp, light rate limit
 
 function sanitize(text) {
   return String(text)
@@ -122,6 +133,9 @@ io.on('connection', (socket) => {
     if (room.passwordHash && !isOwnerAttempt && !store.verifyPassword(password || '', room.passwordHash)) {
       return cb && cb({ error: 'Incorrect password' });
     }
+    if (room.maxMembers && !isOwnerAttempt && presenceList(code).length >= room.maxMembers) {
+      return cb && cb({ error: 'This room is full' });
+    }
 
     const name = String(displayName || 'Guest').trim().slice(0, 24) || 'Guest';
     const color = AVATAR_COLORS.includes(avatarColor)
@@ -144,11 +158,16 @@ io.on('connection', (socket) => {
         accent: room.accent,
         slowMode: room.slowMode,
         closed: room.closed,
+        liveMode: room.liveMode,
+        maxMembers: room.maxMembers,
         pinnedMessageId: room.pinnedMessageId,
         isOwner: socket.data.isOwner,
       },
       messages: history,
       members: presenceList(code),
+      liveDrafts: room.liveMode ? Object.fromEntries(
+        Array.from((liveDrafts.get(code) || new Map()).entries()).map(([id, d]) => [id, d.text])
+      ) : {},
     });
 
     const joinMsg = store.addMessage(code, {
@@ -194,7 +213,25 @@ io.on('connection', (socket) => {
       reactions: {},
     });
     io.to(code).emit('new_message', publicMessage(message));
+    if (liveDrafts.has(code) && liveDrafts.get(code).delete(clientId)) {
+      socket.to(code).emit('live_typing_update', { clientId, text: '' });
+    }
     cb && cb({ ok: true, id: message.id });
+  });
+
+  socket.on('live_typing', ({ text }) => {
+    const { code, clientId, member } = socket.data;
+    const room = code && store.getRoom(code);
+    if (!room || !room.liveMode || !member) return;
+
+    const now = Date.now();
+    if (now - (lastLiveEmit.get(clientId) || 0) < 25) return;
+    lastLiveEmit.set(clientId, now);
+
+    const draft = String(text || '').slice(0, 2000);
+    if (!liveDrafts.has(code)) liveDrafts.set(code, new Map());
+    liveDrafts.get(code).set(clientId, { text: draft, updatedAt: now });
+    socket.to(code).emit('live_typing_update', { clientId, text: draft });
   });
 
   socket.on('edit_message', ({ id, body }, cb) => {
@@ -285,8 +322,14 @@ io.on('connection', (socket) => {
     if (typeof patch.accent === 'string' && /^#[0-9a-fA-F]{6}$/.test(patch.accent)) update.accent = patch.accent;
     if (typeof patch.slowMode === 'number') update.slowMode = Math.max(0, Math.min(120, Math.floor(patch.slowMode)));
     if (typeof patch.closed === 'boolean') update.closed = patch.closed;
+    if (typeof patch.liveMode === 'boolean') update.liveMode = patch.liveMode;
+    if (typeof patch.maxMembers === 'number') update.maxMembers = Math.max(0, Math.min(200, Math.floor(patch.maxMembers)));
 
     const updated = store.updateRoom(code, update);
+    if (update.liveMode === false) {
+      liveDrafts.delete(code);
+      io.to(code).emit('live_typing_cleared');
+    }
     io.to(code).emit('room_updated', publicRoom(updated));
     cb && cb({ ok: true });
   });
@@ -300,6 +343,9 @@ io.on('connection', (socket) => {
     }
     setImmediate(() => {
       const stillPresent = presenceList(code).some((m) => m.clientId === member.clientId);
+      if (!stillPresent && liveDrafts.has(code) && liveDrafts.get(code).delete(member.clientId)) {
+        io.to(code).emit('live_typing_update', { clientId: member.clientId, text: '' });
+      }
       if (!stillPresent) {
         const leaveMsg = store.addMessage(code, {
           id: nanoid(12),
@@ -324,6 +370,8 @@ function publicRoom(room) {
     accent: room.accent,
     slowMode: room.slowMode,
     closed: room.closed,
+    liveMode: room.liveMode,
+    maxMembers: room.maxMembers,
     pinnedMessageId: room.pinnedMessageId,
   };
 }
